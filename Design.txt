@@ -1,0 +1,145 @@
+The design is actually rather simple. We keep track of a typical resource
+allocation graph where an edge from a process to a lock means that process is
+waiting on that lock and an edge from a lock to a process means that lock is
+allocated to that process. This actually makes things quite simple to keep track
+of if we maintain a couple of invariants.
+
+    1.  A node always knows the minimum of all incoming edges (including its own
+        priority).
+    2.  Priorities only ever decrease as you follow a path through the graph.
+
+This makes sense when you think about it -- when a process waits on a lock, you
+can follow the path all the way through to its end (this is the process which
+holds the lock). Since priorities only ever decrease, the process which holds
+the lock must have a priority at least as high (lower in number) than the one
+waiting on it. This is further generalized through any such graph which
+satisfies these conditions -- any process holding a lock must have a priority at
+least as high as any other process waiting on the lock (either directly or
+indirectly through another node).
+
+The majority of the work then is maintaining these invariants. There are exactly
+2 different operations which can be performed on the graph:
+
+    1.  Add an edge (either request or allocation). In this case we have created
+        a new path through the graph and must fix it so that priorities are
+        decreasing along it. None of the edges before the one added need to
+        change since if priorities were decreasing before then they still are
+        now (at least up until the added edge). What remains to be done is
+        notify all outgoing neighbors that they have a new incoming edge. If
+        they already had a better priority from somewhere else, they ignore this
+        update and the propagation stops here.
+
+        In the worst case, all nodes (processes and locks) are in a single
+        string and we added an edge to the beginning. This means we must
+        traverse the entire graph in the worst case: O(n). Where n is the total
+        number of locks + processes.
+
+    2.  Remove an edge from the graph. In this case we need to re-evaluate the
+        minimum coming into the node since the previous one might have just been
+        removed. In the worst case, this node has an incoming edge from every
+        other node in the graph (i.e. all processes waiting on the same lock):
+        O(n).
+
+        The important observation to make here is that even though the priority
+        for this node might change, it can't possible break invariant #2. The
+        reason is that, because of the way locks work, whenever an edge is
+        removed there are guaranteed to be no outgoing edges from the node where
+        the edge terminated (the one we are re-evaluating the minimum for). An
+        edge is removed in 2 different cases. In the first, a process releases a
+        lock. In order for a process to release a lock it must be running, if it
+        is running then it is not waiting on another lock and so can't have any
+        outgoing edges. In the second case, a lock is giving ownership to the
+        next process in line (i.e. deleting a request edge before it adds an
+        allocation edge). Here too, there are no outgoing edges from the lock
+        because if it is in the process of giving it to another process then no
+        process currently has it and so there is no outgoing edge.
+
+With these primitives we can then define what happens inside the lock:
+
+    Acquire:    If available, add an allocation edge to a process, otherwise add a
+                request edge from the process.
+
+    Release:    Remove the allocation edge. Remove a single request edge. Add an
+                allocation edge to the new process.
+
+Since each individual operation is O(n) and we do at most 3 for each function,
+the total time complexity is O(3n) = O(n).
+
+The way all of this is implemented is as follows. All of the above is in a base
+class called ResourceNode (which is now a parent class for both KThread and Lock
+classes). This class implements the operations listed above to maintain the
+graph and know what priority a process should run with. We believe this to be
+both simple and efficient. The only time any work must be done is when a thread
+acquires or releases a lock. Even though it looks to take O(n) time we believe
+that in practice the lengths of paths will be quite short and the number of
+incoming edges for any node to be small and so it will usually not have to
+traverse the entire graph.
+
+To make testing easy, we defined the TestScheduler interface. It is very simple,
+a class need only implement a test() function. This allows us to specify the
+test we want to run using the configuration file without having to modify
+KThread.selfTest(). This greatly simplified testing since we can now write each
+test in its own class and just specify which one we want to run. (Note for a
+test to work correctly, there must be a call to Log.init() at the beginning and
+a call to ThreadedKernel.scheduler.printSystemStats() at the end of it)
+
+The class 'Log' handles getting the name of the logfile to write and deciding
+whether to write to the file or stdout. It also provides the system time for
+use in recording statistics about threads. It is set to 0 in init().
+
+Examples Included:
+
+We have several different tests (increasing in complexity) to demonstrate the
+solution. We refer to them by the names of the configuration file which can be
+used to run them. One note: for most of the tests, the threads start with
+priority 0 and then downgrade themselves after the situation has been set up so
+at the beginning you will see every thread scheduled has a priority of 0.
+
+Lock1.conf: Very simple example showing mutual exclusion with locks. Not very
+            exciting.
+
+Lock2Inversion.conf:    The lowest priority grabs the lock and yields. All
+                        others try to acquire the lock with the exception of
+                        AlwaysRun. AlwaysRun has second to lowest priority and
+                        doesn't need the lock. Since priority donation is off,
+                        we see that every thread must wait for AlwaysRun to
+                        finish before the lowest priority thread (the one with
+                        the lock) can finally finish. This clearly shows the
+                        FIFO property of the lock.
+
+Lock3InversionFixed.conf:   Same as above except with priority donation. Now we
+                            see AlwaysRun wait for all of the other threads to
+                            finish since they inherit the high priority of
+                            thread 0.
+
+Scenario1OFF.conf:  This is the first scenario listed in part 3 of the write up.
+                    It is very similar to above since AlwaysRun gets to go ahead
+                    of low priority (priority donation off).
+
+Scenario1ON.conf:   Now, with priority donation on, we see that the low priority
+                    thread is allowed to run. The main thing to note here is
+                    that the medium priority thread gets to keep high's donation
+                    after low releases the lock and so still prevents AlwaysRun
+                    from executing. This is what is supposed to happen since
+                    high is still waiting on the lock.
+
+Scenario2OFF.conf:  This is the most complex scenario and is described in part 3
+                    of the write up. Remember priority donation is off here. We
+                    add 2 additional threads to make the point clear (Again
+                    AlwaysRun). The priorities of the threads are: H - 0, M - 5,
+                    L - 10, Always1 - 7, Always2 - 3. Initially, high and
+                    Always2 are sleeping. The scheduler can choose between M, L,
+                    and Always1 -- it picks M. Then, since M tries to acquire
+                    L's lock, it becomes unable to run. Since priority donation
+                    is off, Always1 gets to run and make L (and M) wait. Next, L
+                    is the only thread available to run, it wakes up H and
+                    creates Always2 (each with a higher priority). H waits on
+                    the lock M holds. Now the scheduler has to choose between L
+                    and Always2 and again picks always and makes L (and M and H)
+                    wait. Finally, L is allowed to finish and release its lock
+                    and then M followed by H can run.
+
+Scenario2ON.conf:   Now, with donation on, As soon as M waits on L's lock, L is
+                    allowed to run to completion ahead of the AlwaysRun threads.
+                    Then M and then H run next (since M has H's priority) and
+                    the AlwaysRun are made to run last.
