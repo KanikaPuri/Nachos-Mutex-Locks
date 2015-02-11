@@ -1,5 +1,6 @@
 Readme.txt
 
+
 Nachos-Operating-System-Project
 
 What is Nachos? An instructional operating system simulator that is written in Java at UC Berkeley and it is based on earlier C++ versions. It implements many aspects of a real OS, threads, processes, timers, interrupts, scheduling, memory management and simulates hardware. It is a MIPS-based CPU, it can load and execute MIPS binaries as user processes.
